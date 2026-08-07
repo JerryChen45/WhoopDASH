@@ -1,0 +1,7 @@
+.env
+tokens.json
+data.json
+alert-state.json
+*.log
+node_modules/
+.DS_Store

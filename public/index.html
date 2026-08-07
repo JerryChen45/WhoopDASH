@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WHOOP Dashboard</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page:           #f9f9f7;
+    --surface-1:      #fcfcfb;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --grid:           #e1e0d9;
+    --axis:           #c3c2b7;
+    --border:         rgba(11,11,11,0.10);
+    --series-1:       #2a78d6;  /* blue */
+    --series-2:       #eb6834;  /* orange */
+    --status-good:     #0ca30c;
+    --status-warning:  #fab219;
+    --status-critical: #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --page:           #0d0d0d;
+      --surface-1:      #1a1a19;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --grid:           #2c2c2a;
+      --axis:           #383835;
+      --border:         rgba(255,255,255,0.10);
+      --series-1:       #3987e5;
+      --series-2:       #d95926;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--page); color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 24px; max-width: 1100px; margin-inline: auto;
+  }
+  header { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0; }
+  .meta { color: var(--text-muted); font-size: 13px; }
+  .meta button, .connect {
+    font: inherit; font-size: 13px; border: 1px solid var(--border); background: var(--surface-1);
+    color: var(--text-secondary); border-radius: 8px; padding: 5px 12px; cursor: pointer;
+  }
+  .connect { display: inline-block; text-decoration: none; color: var(--text-primary); font-weight: 600; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+  .card {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 14px; padding: 18px;
+  }
+  .card h2 { font-size: 13px; font-weight: 500; color: var(--text-secondary); margin: 0 0 10px; }
+  .hero-card { display: flex; flex-direction: column; }
+  .hero { font-size: 56px; font-weight: 600; line-height: 1; }
+  .hero small { font-size: 22px; color: var(--text-muted); font-weight: 500; }
+  .zone { display: inline-flex; align-items: center; gap: 6px; margin-top: 10px; font-size: 13px; color: var(--text-secondary); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 18px; }
+  .tile .label { font-size: 12px; color: var(--text-muted); }
+  .tile .value { font-size: 22px; font-weight: 600; }
+  .tile .sub { font-size: 12px; color: var(--text-secondary); }
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; margin-top: 14px; }
+  svg text { font-family: inherit; }
+  .axis-label { font-size: 10px; fill: var(--text-muted); }
+  .tooltip {
+    position: fixed; pointer-events: none; z-index: 10; background: var(--surface-1);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 12px;
+    color: var(--text-primary); box-shadow: 0 4px 14px rgba(0,0,0,.12); display: none;
+  }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--text-secondary); margin-top: 6px; flex-wrap: wrap; }
+  .legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .alerts li { font-size: 13px; color: var(--text-secondary); margin-bottom: 6px; }
+  .alerts b { color: var(--text-primary); font-weight: 600; }
+  .alerts time { color: var(--text-muted); font-size: 11px; margin-left: 6px; }
+  ul { margin: 0; padding-left: 18px; }
+  .empty { color: var(--text-muted); font-size: 14px; padding: 30px 0; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>WHOOP Dashboard</h1>
+  <div class="meta">
+    <span id="updated"></span>
+    <button onclick="doRefresh()">Refresh</button>
+    <button onclick="fetch('/api/test-alert')">Test alert</button>
+  </div>
+</header>
+<div id="app"><div class="empty">Loading…</div></div>
+<div class="tooltip" id="tt"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const tt = () => $("#tt");
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+function zoneOf(r) {
+  if (r == null) return { name: "—", color: "var(--text-muted)" };
+  if (r >= 67) return { name: "Green — recovered", color: "var(--status-good)" };
+  if (r >= 34) return { name: "Yellow — adequate", color: "var(--status-warning)" };
+  return { name: "Red — take it easy", color: "var(--status-critical)" };
+}
+
+function fmtDay(iso) {
+  const d = new Date(iso);
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+async function load() {
+  const s = await (await fetch("/api/summary")).json();
+  const app = $("#app");
+  if (!s.connected) {
+    app.innerHTML = `<div class="card" style="text-align:center;padding:60px 20px">
+      <p style="color:var(--text-secondary);margin-bottom:20px">Not connected to WHOOP yet.</p>
+      <a class="connect" href="/auth">Connect WHOOP</a></div>`;
+    return;
+  }
+  $("#updated").textContent = s.updated ? "Updated " + new Date(s.updated).toLocaleTimeString() : "";
+  const t = s.today, z = zoneOf(t.recovery);
+  const workouts = t.workoutsToday.length
+    ? t.workoutsToday.map(w => `${w.sport ?? "workout"} (${w.strain?.toFixed(1) ?? "—"})`).join(", ")
+    : "none yet";
+
+  app.innerHTML = `
+  <div class="grid">
+    <div class="card hero-card">
+      <h2>Recovery today</h2>
+      <div class="hero">${t.recovery ?? "—"}<small>${t.recovery != null ? "%" : ""}</small></div>
+      <div class="zone"><span class="dot" style="background:${z.color}"></span>${z.name}</div>
+    </div>
+    <div class="card">
+      <h2>Today</h2>
+      <div class="tiles">
+        <div class="tile"><div class="label">Day strain</div><div class="value">${t.strain?.toFixed(1) ?? "—"}</div></div>
+        <div class="tile"><div class="label">Calories</div><div class="value">${t.calories?.toLocaleString() ?? "—"}</div></div>
+        <div class="tile"><div class="label">HRV</div><div class="value">${t.hrv != null ? Math.round(t.hrv) + " ms" : "—"}</div>
+          <div class="sub">baseline ~${s.baselines.hrv ? Math.round(s.baselines.hrv) : "—"}</div></div>
+        <div class="tile"><div class="label">Resting HR</div><div class="value">${t.rhr ?? "—"}${t.rhr != null ? " bpm" : ""}</div>
+          <div class="sub">baseline ~${s.baselines.rhr ? Math.round(s.baselines.rhr) : "—"}</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Last night</h2>
+      <div class="tiles">
+        <div class="tile"><div class="label">Sleep</div><div class="value">${t.sleepHours != null ? t.sleepHours + " h" : "—"}</div></div>
+        <div class="tile"><div class="label">Sleep performance</div><div class="value">${t.sleepPerformance != null ? t.sleepPerformance + "%" : "—"}</div></div>
+        <div class="tile" style="grid-column:1/-1"><div class="label">Workouts today</div><div class="sub" style="font-size:14px;color:var(--text-primary)">${workouts}</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="charts">
+    <div class="card"><h2>Recovery — last 14 days</h2><div id="c-recovery"></div>
+      <div class="legend">
+        <span><span class="dot" style="background:var(--status-good)"></span>≥67 green</span>
+        <span><span class="dot" style="background:var(--status-warning)"></span>34–66 yellow</span>
+        <span><span class="dot" style="background:var(--status-critical)"></span>≤33 red</span>
+      </div></div>
+    <div class="card"><h2>Day strain — last 14 days</h2><div id="c-strain"></div></div>
+    <div class="card"><h2>HRV — last 14 days</h2><div id="c-hrv"></div></div>
+    <div class="card"><h2>Sleep hours — last 14 days</h2><div id="c-sleep"></div></div>
+  </div>
+  <div class="charts">
+    <div class="card alerts"><h2>Recent alerts</h2>
+      ${s.alerts.length ? "<ul>" + s.alerts.map(a =>
+        `<li><b>${a.title.replace("WHOOP: ", "")}</b> — ${a.message}<time>${new Date(a.at).toLocaleString()}</time></li>`).join("") + "</ul>"
+        : '<div class="empty">No alerts yet.</div>'}
+    </div>
+  </div>`;
+
+  const rec14 = s.history.recoveries.slice(-14);
+  barChart("#c-recovery", rec14.map(r => ({ x: r.date, y: r.score })), {
+    max: 100, color: d => zoneOf(d.y).color,
+    tip: d => `${fmtDay(d.x)} — recovery ${d.y}% (${zoneOf(d.y).name.split(" — ")[0]})`
+  });
+  lineChart("#c-strain", s.history.cycles.slice(-14).map(c => ({ x: c.date, y: c.strain })), {
+    max: 21, color: "var(--series-2)", tip: d => `${fmtDay(d.x)} — strain ${d.y?.toFixed(1)}`
+  });
+  lineChart("#c-hrv", rec14.map(r => ({ x: r.date, y: r.hrv })), {
+    color: "var(--series-1)", baseline: s.baselines.hrv,
+    tip: d => `${fmtDay(d.x)} — HRV ${Math.round(d.y)} ms`
+  });
+  if (s.baselines.hrv) $("#c-hrv").insertAdjacentHTML("afterend",
+    `<div class="legend"><span><span style="display:inline-block;width:14px;height:0;border-top:1px solid var(--text-muted)"></span>14-day baseline (~${Math.round(s.baselines.hrv)} ms)</span></div>`);
+  barChart("#c-sleep", s.history.sleeps.slice(-14).map(x => ({ x: x.date, y: x.hours })), {
+    color: () => "var(--series-1)", tip: d => `${fmtDay(d.x)} — ${d.y} h sleep`
+  });
+}
+
+const W = 420, H = 160, PAD = { l: 30, r: 8, t: 8, b: 20 };
+
+function scale(data, opt) {
+  const ys = data.map(d => d.y).filter(y => y != null);
+  const max = opt.max ?? Math.max(...ys, 1) * 1.1;
+  return { max, x: i => PAD.l + (W - PAD.l - PAD.r) * (i + 0.5) / data.length, y: v => H - PAD.b - (H - PAD.t - PAD.b) * (v / max) };
+}
+
+function frame(sc, data) {
+  let g = "";
+  const steps = 4;
+  for (let i = 0; i <= steps; i++) {
+    const v = sc.max * i / steps, y = sc.y(v);
+    g += `<line x1="${PAD.l}" y1="${y}" x2="${W - PAD.r}" y2="${y}" stroke="var(--grid)" stroke-width="1"/>`;
+    g += `<text class="axis-label" x="${PAD.l - 4}" y="${y + 3}" text-anchor="end">${Math.round(v)}</text>`;
+  }
+  data.forEach((d, i) => {
+    if (i % Math.ceil(data.length / 5) === 0)
+      g += `<text class="axis-label" x="${sc.x(i)}" y="${H - 6}" text-anchor="middle">${fmtDay(d.x)}</text>`;
+  });
+  g += `<line x1="${PAD.l}" y1="${sc.y(0)}" x2="${W - PAD.r}" y2="${sc.y(0)}" stroke="var(--axis)" stroke-width="1"/>`;
+  return g;
+}
+
+function attachTips(el, data, sc, tipFn) {
+  el.querySelectorAll("[data-i]").forEach(node => {
+    node.addEventListener("mousemove", e => {
+      const d = data[+node.dataset.i];
+      const t = tt(); t.style.display = "block"; t.textContent = tipFn(d);
+      t.style.left = (e.clientX + 12) + "px"; t.style.top = (e.clientY - 10) + "px";
+    });
+    node.addEventListener("mouseleave", () => tt().style.display = "none");
+  });
+}
+
+function barChart(sel, data, opt) {
+  const el = $(sel);
+  if (!data.length) { el.innerHTML = '<div class="empty">No data</div>'; return; }
+  const sc = scale(data, opt);
+  const bw = Math.min(20, (W - PAD.l - PAD.r) / data.length - 6);
+  let bars = "";
+  data.forEach((d, i) => {
+    if (d.y == null) return;
+    const x = sc.x(i) - bw / 2, y = sc.y(d.y), h = sc.y(0) - y;
+    const r = Math.min(4, bw / 2, h);
+    bars += `<path data-i="${i}" d="M${x},${y + r} a${r},${r} 0 0 1 ${r},-${r} h${bw - 2 * r} a${r},${r} 0 0 1 ${r},${r} v${h - r} h${-bw} z"
+      fill="${opt.color(d)}"/>`;
+  });
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="100%">${frame(sc, data)}${bars}</svg>`;
+  attachTips(el, data, sc, opt.tip);
+}
+
+function lineChart(sel, data, opt) {
+  const el = $(sel);
+  const pts = data.filter(d => d.y != null);
+  if (!pts.length) { el.innerHTML = '<div class="empty">No data</div>'; return; }
+  const sc = scale(data, opt);
+  let path = "";
+  data.forEach((d, i) => { if (d.y != null) path += (path ? " L" : "M") + sc.x(i) + " " + sc.y(d.y); });
+  let extra = "";
+  if (opt.baseline) {
+    const by = sc.y(opt.baseline);
+    extra += `<line x1="${PAD.l}" y1="${by}" x2="${W - PAD.r}" y2="${by}" stroke="var(--text-muted)" stroke-width="1"/>`;
+  }
+  let dots = "";
+  data.forEach((d, i) => {
+    if (d.y == null) return;
+    dots += `<circle data-i="${i}" cx="${sc.x(i)}" cy="${sc.y(d.y)}" r="4" fill="${opt.color}" stroke="var(--surface-1)" stroke-width="2"/>`;
+  });
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="100%">${frame(sc, data)}${extra}
+    <path d="${path}" fill="none" stroke="${opt.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>${dots}</svg>`;
+  attachTips(el, data, sc, opt.tip);
+}
+
+async function doRefresh() {
+  $("#updated").textContent = "Refreshing…";
+  await fetch("/api/refresh");
+  load();
+}
+
+load();
+setInterval(load, 5 * 60 * 1000);
+</script>
+</body>
+</html>
